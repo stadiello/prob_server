@@ -311,8 +311,6 @@ async def collect_once() -> bool:
 
     await client.start_notify(UART_TX_UUID, on_data)
 
-        await client.start_notify(UART_TX_UUID, on_data)
-
         log(
             "En attente d'une mesure valide pendant "
             f"{READ_TIMEOUT_SECONDS} secondes..."
