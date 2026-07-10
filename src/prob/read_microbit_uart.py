@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Optional
 
 from bleak import BleakClient, BleakScanner
+from bleak.backends.device import BLEDevice
 
 
 TARGET_NAME = "BBC micro:bit"
@@ -246,7 +247,62 @@ async def find_microbit():
     await asyncio.sleep(1.5)
 
     return device
+    
+async def connect_with_retry(
+    device: BLEDevice,
+    attempts: int = 3,
+    delay_seconds: float = 2.0,
+) -> BleakClient:
+    """
+    Tente plusieurs connexions rapides sur le même périphérique déjà trouvé,
+    sans relancer un scan BLE complet.
+    """
 
+    last_error: Optional[Exception] = None
+
+    for attempt in range(1, attempts + 1):
+        client = BleakClient(device, timeout=30.0)
+
+        try:
+            log(f"Connexion BLE : tentative {attempt}/{attempts}")
+
+            await client.connect()
+
+            if client.is_connected:
+                log("Connexion BLE établie")
+                return client
+
+            last_error = RuntimeError(
+                "La connexion s'est terminée sans erreur, "
+                "mais client.is_connected vaut False"
+            )
+
+        except Exception as error:
+            last_error = error
+
+            log(
+                f"Échec connexion {attempt}/{attempts} : "
+                f"{type(error).__name__}: {error}"
+            )
+
+        try:
+            await client.disconnect()
+        except Exception as disconnect_error:
+            log(
+                "Nettoyage de la connexion impossible : "
+                f"{type(disconnect_error).__name__}: "
+                f"{disconnect_error}"
+            )
+
+        if attempt < attempts:
+            log(
+                f"Nouvelle tentative dans {delay_seconds:g} secondes..."
+            )
+            await asyncio.sleep(delay_seconds)
+
+    raise RuntimeError(
+        f"Connexion impossible après {attempts} tentatives"
+    ) from last_error
 
 async def send_ack(
     client: BleakClient,
@@ -266,22 +322,15 @@ async def send_ack(
 
 
 async def collect_once() -> bool:
-    log("Recherche du micro:bit...")
-
     device = await find_microbit()
-
-    if device is None:
-        log("micro:bit non trouvé")
-        return False
-
-    log(f"Trouvé : {device.name} {device.address}")
-    log("Connexion...")
 
     # Queue permettant au callback BLE synchrone de transmettre les lignes
     # complètes à la coroutine principale.
     line_queue: asyncio.Queue[str] = asyncio.Queue()
 
     receive_buffer = ""
+    client: Optional[BleakClient] = None
+    notifications_started = False
 
     def on_data(sender, data: bytearray) -> None:
         nonlocal receive_buffer
@@ -296,7 +345,13 @@ async def collect_once() -> bool:
             if line:
                 line_queue.put_nowait(line)
 
-    async with BleakClient(device, timeout=30.0) as client:
+    try:
+        client = await connect_with_retry(
+            device=device,
+            attempts=3,
+            delay_seconds=2.0,
+        )
+
         log(f"Connecté : {client.is_connected}")
 
         for service in client.services:
@@ -309,83 +364,84 @@ async def collect_once() -> bool:
                 )
 
         await client.start_notify(UART_TX_UUID, on_data)
+        notifications_started = True
+
         log(
             "En attente d'une mesure valide pendant "
             f"{READ_TIMEOUT_SECONDS} secondes..."
         )
 
-        try:
-            deadline = (
-                asyncio.get_running_loop().time()
-                + READ_TIMEOUT_SECONDS
+        deadline = (
+            asyncio.get_running_loop().time()
+            + READ_TIMEOUT_SECONDS
+        )
+
+        processed_keys = set()
+
+        while True:
+            remaining_time = (
+                deadline
+                - asyncio.get_running_loop().time()
             )
 
-            processed_keys = set()
+            if remaining_time <= 0:
+                raise asyncio.TimeoutError
 
-            while True:
-                remaining_time = (
-                    deadline
-                    - asyncio.get_running_loop().time()
+            line = await asyncio.wait_for(
+                line_queue.get(),
+                timeout=remaining_time,
+            )
+
+            log(f"Reçu : {line}")
+
+            measurement = parse_payload(line)
+
+            if measurement is None:
+                continue
+
+            key = (
+                measurement["device_id"],
+                measurement["seq"],
+            )
+
+            # Le firmware renvoie le même payload toutes les deux secondes.
+            if key in processed_keys:
+                log(
+                    "Répétition ignorée : "
+                    f"{key[0]} seq={key[1]}"
                 )
+                continue
 
-                if remaining_time <= 0:
-                    raise asyncio.TimeoutError
+            processed_keys.add(key)
 
-                line = await asyncio.wait_for(
-                    line_queue.get(),
-                    timeout=remaining_time,
+            saved = save_measurement(measurement)
+
+            if not saved:
+                # Aucun ACK : le micro:bit continuera à retransmettre.
+                log(
+                    "Mesure non acquittée car l'écriture CSV "
+                    "a échoué"
                 )
+                continue
 
-                log(f"Reçu : {line}")
+            await send_ack(
+                client,
+                measurement["device_id"],
+                measurement["seq"],
+            )
 
-                measurement = parse_payload(line)
+            # Laisse le temps au contrôleur Bluetooth de transmettre l'ACK.
+            await asyncio.sleep(0.25)
 
-                if measurement is None:
-                    continue
+            return True
 
-                key = (
-                    measurement["device_id"],
-                    measurement["seq"],
-                )
+    except asyncio.TimeoutError:
+        log("Aucune mesure valide reçue avant expiration.")
+        return False
 
-                # Le firmware renvoie le même payload toutes les deux secondes.
-                if key in processed_keys:
-                    log(
-                        "Répétition ignorée : "
-                        f"{key[0]} seq={key[1]}"
-                    )
-                    continue
-
-                processed_keys.add(key)
-
-                saved = save_measurement(measurement)
-
-                if not saved:
-                    # Aucun ACK : le micro:bit continuera à retransmettre.
-                    log(
-                        "Mesure non acquittée car l'écriture CSV "
-                        "a échoué"
-                    )
-                    continue
-
-                await send_ack(
-                    client,
-                    measurement["device_id"],
-                    measurement["seq"],
-                )
-
-                # Petite marge pour laisser BlueZ transmettre l'écriture
-                # avant la déconnexion.
-                await asyncio.sleep(0.25)
-
-                return True
-
-        except asyncio.TimeoutError:
-            log("Aucune mesure valide reçue avant expiration.")
-            return False
-
-        finally:
-            if client.is_connected:
+    finally:
+        if client is not None:
+            if notifications_started and client.is_connected:
                 try:
                     await client.stop_notify(UART_TX_UUID)
                 except Exception as error:
@@ -394,6 +450,15 @@ async def collect_once() -> bool:
                         f"{type(error).__name__}: {error}"
                     )
 
+            if client.is_connected:
+                try:
+                    await client.disconnect()
+                    log("Déconnexion BLE effectuée")
+                except Exception as error:
+                    log(
+                        "Déconnexion impossible : "
+                        f"{type(error).__name__}: {error}"
+                    )
 
 async def main() -> None:
     log("Démarrage du logger BLE micro:bit")
