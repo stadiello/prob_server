@@ -176,7 +176,11 @@ HTML = """
                 <select name="metric">
                     <option value="temperature_c" {% if metric == "temperature_c" %}selected{% endif %}>Température</option>
                     <option value="light_level" {% if metric == "light_level" %}selected{% endif %}>Luminosité</option>
-                    <option value="sound_level" {% if metric == "sound_level" %}selected{% endif %}>Son</option>
+                    <option value="sound_average_db" {% if metric == "sound_average_db" %}selected{% endif %}>Son moyen</option>
+                    <option value="sound_peak_db" {% if metric == "sound_peak_db" %}selected{% endif %}>Pic sonore</option>
+                    <option value="acceleration" {% if metric == "acceleration" %}selected{% endif %}>Accélération</option>
+                    <option value="pitch" {% if metric == "pitch" %}selected{% endif %}>Pitch</option>
+                    <option value="roll" {% if metric == "roll" %}selected{% endif %}>Roll</option>
                 </select>
             </label>
             <label>
@@ -222,9 +226,42 @@ HTML = """
                 <div class="value">{{ latest.light_level }}</div>
             </div>
             <div class="card">
-                <div class="label">Son</div>
-                <div class="value">{{ latest.sound_level }}</div>
-            </div>
+    <div class="label">Son moyen</div>
+    <div class="value">
+        {{ latest.sound_average_db }} dB
+    </div>
+</div>
+
+<div class="card">
+    <div class="label">Pic sonore</div>
+    <div class="value">
+        {{ latest.sound_peak_db }} dB
+    </div>
+</div>
+
+<div class="card">
+    <div class="label">Déplacement</div>
+
+    {% if latest.moved == "1" %}
+        <div class="value bad">DÉTECTÉ</div>
+    {% else %}
+        <div class="value ok">AUCUN</div>
+    {% endif %}
+</div>
+
+<div class="card">
+    <div class="label">Orientation</div>
+    <div class="value" style="font-size:18px;">
+        P {{ latest.pitch }}° / R {{ latest.roll }}°
+    </div>
+</div>
+
+<div class="card">
+    <div class="label">Accélération</div>
+    <div class="value">
+        {{ latest.acceleration }}
+    </div>
+</div>
             <div class="card">
                 <div class="label">Dernière mesure</div>
                 <div class="value" style="font-size:18px;">{{ latest.raspberry_timestamp }}</div>
@@ -250,19 +287,35 @@ HTML = """
                     <th>Uptime ms</th>
                     <th>Temp °C</th>
                     <th>Lumière</th>
-                    <th>Son</th>
+                    <th>Son moyen</th>
+                    <th>Pic sonore</th>
+                    <th>Déplacé</th>
+                    <th>Pitch</th>
+                    <th>Roll</th>
+                    <th>Accélération</th>
                 </tr>
             </thead>
             <tbody>
                 {% for row in table_rows %}
                 <tr>
-                    <td>{{ row.raspberry_timestamp }}</td>
-                    <td>{{ row.device_id }}</td>
-                    <td>{{ row.seq }}</td>
-                    <td>{{ row.microbit_uptime_ms }}</td>
-                    <td>{{ row.temperature_c }}</td>
-                    <td>{{ row.light_level }}</td>
-                    <td>{{ row.sound_level }}</td>
+                   <td>{{ row.raspberry_timestamp }}</td>
+        <td>{{ row.device_id }}</td>
+        <td>{{ row.seq }}</td>
+        <td>{{ row.microbit_uptime_ms }}</td>
+        <td>{{ row.temperature_c }}</td>
+        <td>{{ row.light_level }}</td>
+        <td>{{ row.sound_average_db }}</td>
+        <td>{{ row.sound_peak_db }}</td>
+        <td>
+            {% if row.moved == "1" %}
+                <span class="bad">Oui</span>
+            {% else %}
+                <span class="ok">Non</span>
+            {% endif %}
+        </td>
+        <td>{{ row.pitch }}</td>
+        <td>{{ row.roll }}</td>
+        <td>{{ row.acceleration }}</td>
                 </tr>
                 {% endfor %}
             </tbody>
@@ -431,9 +484,30 @@ HTML = """
 METRICS = {
     "temperature_c": "Température °C",
     "light_level": "Luminosité",
-    "sound_level": "Son",
+    "sound_average_db": "Son moyen",
+    "sound_peak_db": "Pic sonore",
+    "acceleration": "Accélération",
+    "pitch": "Inclinaison pitch",
+    "roll": "Inclinaison roll",
 }
 
+def normalize_row(row):
+    normalized = dict(row)
+
+    old_sound = normalized.get("sound_level")
+
+    if not normalized.get("sound_average_db"):
+        normalized["sound_average_db"] = old_sound or "0"
+
+    if not normalized.get("sound_peak_db"):
+        normalized["sound_peak_db"] = old_sound or "0"
+
+    normalized.setdefault("moved", "0")
+    normalized.setdefault("pitch", "0")
+    normalized.setdefault("roll", "0")
+    normalized.setdefault("acceleration", "0")
+
+    return normalized
 
 def parse_date_or_default(value, default_value):
     try:
@@ -610,25 +684,21 @@ def read_rows(start, end):
     rows = []
 
     for path in paths:
-        with path.open("r", newline="") as f:
-            reader = csv.DictReader(f)
+        with path.open(
+            "r",
+            newline="",
+            encoding="utf-8",
+        ) as file:
+            reader = csv.DictReader(file)
+
             for row in reader:
-                rows.append(row)
+                rows.append(normalize_row(row))
 
-    # Tri chronologique
-    rows.sort(key=lambda r: row_datetime(r) or datetime.min)
+    rows.sort(
+        key=lambda row: row_datetime(row) or datetime.min
+    )
 
-    # Déduplication : garde la première ligne pour chaque device_id + seq
-    seen = set()
-    deduped = []
-    for row in rows:
-        key = (row.get("device_id"), row.get("seq"))
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(row)
-
-    return paths, deduped
+    return paths, rows
 
 
 def compute_status(latest):
