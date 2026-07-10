@@ -21,13 +21,15 @@ UART_RX_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
 OUTPUT_DIR = Path("/home/pi/microbit_data")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-SCAN_TIMEOUT_SECONDS = 20
 
 # Durée maximale d'attente après la connexion.
 # Le micro:bit annonce pendant 20 secondes : on garde une petite marge.
+
+SCAN_TIMEOUT_SECONDS = 45
 READ_TIMEOUT_SECONDS = 25
 
-PAUSE_BETWEEN_CYCLES_SECONDS = 30
+PAUSE_AFTER_SUCCESS_SECONDS = 270
+PAUSE_AFTER_NO_DATA_SECONDS = 10
 PAUSE_AFTER_ERROR_SECONDS = 10
 
 
@@ -469,15 +471,19 @@ async def main() -> None:
 
             if success:
                 log("Cycle terminé avec ACK")
+                log(
+                    f"Pause {PAUSE_AFTER_SUCCESS_SECONDS} secondes "
+                    "avant d'attendre la prochaine mesure"
+                )
+                await asyncio.sleep(PAUSE_AFTER_SUCCESS_SECONDS)
+
             else:
                 log("Cycle terminé sans ACK")
-
-            log(
-                f"Pause {PAUSE_BETWEEN_CYCLES_SECONDS} secondes "
-                "avant le prochain scan"
-            )
-
-            await asyncio.sleep(PAUSE_BETWEEN_CYCLES_SECONDS)
+                log(
+                    f"Nouvelle tentative dans "
+                    f"{PAUSE_AFTER_NO_DATA_SECONDS} secondes"
+                )
+                await asyncio.sleep(PAUSE_AFTER_NO_DATA_SECONDS)
 
         except asyncio.CancelledError:
             log("Arrêt demandé")
@@ -489,7 +495,6 @@ async def main() -> None:
                 f"Pause {PAUSE_AFTER_ERROR_SECONDS} secondes "
                 "après erreur"
             )
-
             await asyncio.sleep(PAUSE_AFTER_ERROR_SECONDS)
 
 
