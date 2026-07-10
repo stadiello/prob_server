@@ -233,20 +233,19 @@ def save_measurement(measurement: dict) -> bool:
 
 
 async def find_microbit():
-    return await BleakScanner.find_device_by_filter(
-        lambda device, advertisement: (
-            device.address.upper() == TARGET_ADDRESS.upper()
-            or (
-                device.name is not None
-                and TARGET_NAME in device.name
-            )
-            or (
-                advertisement.local_name is not None
-                and TARGET_NAME in advertisement.local_name
-            )
-        ),
+    log("Recherche du micro:bit...")
+
+    device = await BleakScanner.find_device_by_address(
+        TARGET_ADDRESS,
         timeout=SCAN_TIMEOUT_SECONDS,
     )
+
+    if device is None:
+        raise RuntimeError("Micro:bit introuvable")
+    log(f"Trouvé : {device.name} {device.address}")
+    await asyncio.sleep(1.5)
+
+    return device
 
 
 async def send_ack(
