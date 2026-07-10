@@ -9,6 +9,9 @@ app = Flask(__name__)
 
 DATA_DIR = Path("/home/pi/microbit_data")
 
+EXPECTED_SAMPLE_INTERVAL_SECONDS = 5 * 60 # attendu toute les 5 min
+GAP_TOLERANCE_FACTOR = 1.5
+
 
 HTML = """
 <!doctype html>
@@ -265,6 +268,97 @@ HTML = """
             </tbody>
         </table>
 
+                <div class="chart-card">
+            <div class="label">Diagnostic transmission</div>
+
+            <div class="grid" style="margin-top:12px;">
+                <div class="card">
+                    <div class="label">Intervalle attendu</div>
+                    <div class="value" style="font-size:20px;">{{ diagnostics.expected_interval }}</div>
+                </div>
+
+                <div class="card">
+                    <div class="label">Points analysés</div>
+                    <div class="value">{{ diagnostics.total_points }}</div>
+                </div>
+
+                <div class="card">
+                    <div class="label">Incidents détectés</div>
+                    <div class="value {% if diagnostics.incident_count == 0 %}ok{% else %}warn{% endif %}">
+                        {{ diagnostics.incident_count }}
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="label">Fenêtres ratées estimées</div>
+                    <div class="value {% if diagnostics.missed_windows == 0 %}ok{% else %}warn{% endif %}">
+                        {{ diagnostics.missed_windows }}
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="label">Décrochage total estimé</div>
+                    <div class="value {% if diagnostics.total_dropout_seconds == 0 %}ok{% else %}warn{% endif %}" style="font-size:20px;">
+                        {{ diagnostics.total_dropout_duration }}
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="label">Plus gros trou</div>
+                    <div class="value {% if diagnostics.longest_gap_seconds <= 450 %}ok{% else %}warn{% endif %}" style="font-size:20px;">
+                        {{ diagnostics.longest_gap_duration }}
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="label">Intervalle moyen réel</div>
+                    <div class="value" style="font-size:20px;">
+                        {{ diagnostics.average_interval_duration or "N/A" }}
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="label">Décrochage en cours</div>
+                    {% if diagnostics.current_dropout %}
+                        <div class="value bad" style="font-size:20px;">
+                            Oui — {{ diagnostics.current_dropout_duration }}
+                        </div>
+                    {% else %}
+                        <div class="value ok" style="font-size:20px;">Non</div>
+                    {% endif %}
+                </div>
+            </div>
+
+            {% if diagnostics.incidents %}
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Dernière mesure avant trou</th>
+                            <th>Reprise</th>
+                            <th>Écart total</th>
+                            <th>Décrochage estimé</th>
+                            <th>Fenêtres ratées</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for incident in diagnostics.incidents %}
+                        <tr>
+                            <td>{{ incident.start }}</td>
+                            <td>{{ incident.end }}</td>
+                            <td>{{ incident.gap_duration }}</td>
+                            <td>{{ incident.dropout_duration }}</td>
+                            <td>{{ incident.missed_windows }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            {% else %}
+                <p class="muted" style="margin-top:16px;">
+                    Aucun trou anormal détecté sur la période sélectionnée.
+                </p>
+            {% endif %}
+        </div>
+
         <div class="footer">
             Période : {{ start_date }} → {{ end_date }} —
             fichiers lus : {{ csv_count }} —
@@ -392,6 +486,124 @@ def row_datetime(row):
     except Exception:
         return None
 
+def format_duration(seconds):
+    seconds = int(seconds)
+
+    if seconds < 60:
+        return f"{seconds} s"
+
+    minutes = seconds // 60
+    remaining_seconds = seconds % 60
+
+    if minutes < 60:
+        if remaining_seconds:
+            return f"{minutes} min {remaining_seconds} s"
+        return f"{minutes} min"
+
+    hours = minutes // 60
+    remaining_minutes = minutes % 60
+
+    if remaining_minutes:
+        return f"{hours} h {remaining_minutes} min"
+    return f"{hours} h"
+
+
+def compute_diagnostics(rows):
+    """
+    Détecte les décrochages dans la période affichée.
+
+    Principe :
+    - une mesure est attendue toutes les EXPECTED_SAMPLE_INTERVAL_SECONDS secondes
+    - si l'écart entre deux mesures dépasse la tolérance, on considère qu'il y a eu décrochage
+    """
+
+    datetimes = []
+
+    for row in rows:
+        dt = row_datetime(row)
+        if dt is not None:
+            datetimes.append(dt)
+
+    datetimes.sort()
+
+    if not datetimes:
+        return {
+            "expected_interval": format_duration(EXPECTED_SAMPLE_INTERVAL_SECONDS),
+            "total_points": 0,
+            "first_measure": None,
+            "last_measure": None,
+            "incident_count": 0,
+            "missed_windows": 0,
+            "total_dropout_seconds": 0,
+            "total_dropout_duration": "0 s",
+            "longest_gap_seconds": 0,
+            "longest_gap_duration": "0 s",
+            "average_interval_duration": None,
+            "current_dropout": False,
+            "current_dropout_duration": None,
+            "incidents": [],
+        }
+
+    max_normal_gap = EXPECTED_SAMPLE_INTERVAL_SECONDS * GAP_TOLERANCE_FACTOR
+
+    incidents = []
+    total_dropout_seconds = 0
+    missed_windows = 0
+    longest_gap_seconds = 0
+    all_gaps = []
+
+    for previous_dt, current_dt in zip(datetimes, datetimes[1:]):
+        gap_seconds = (current_dt - previous_dt).total_seconds()
+        all_gaps.append(gap_seconds)
+
+        if gap_seconds > longest_gap_seconds:
+            longest_gap_seconds = gap_seconds
+
+        if gap_seconds > max_normal_gap:
+            missed = max(1, int(gap_seconds // EXPECTED_SAMPLE_INTERVAL_SECONDS) - 1)
+            dropout_seconds = max(0, gap_seconds - EXPECTED_SAMPLE_INTERVAL_SECONDS)
+
+            missed_windows += missed
+            total_dropout_seconds += dropout_seconds
+
+            incidents.append({
+                "start": previous_dt.isoformat(timespec="seconds"),
+                "end": current_dt.isoformat(timespec="seconds"),
+                "gap_duration": format_duration(gap_seconds),
+                "dropout_duration": format_duration(dropout_seconds),
+                "missed_windows": missed,
+            })
+
+    latest_dt = datetimes[-1]
+    current_age_seconds = (datetime.now() - latest_dt).total_seconds()
+    current_dropout = current_age_seconds > max_normal_gap
+
+    if current_dropout:
+        current_dropout_seconds = max(0, current_age_seconds - EXPECTED_SAMPLE_INTERVAL_SECONDS)
+    else:
+        current_dropout_seconds = 0
+
+    average_interval = None
+    if all_gaps:
+        average_interval = sum(all_gaps) / len(all_gaps)
+
+    return {
+        "expected_interval": format_duration(EXPECTED_SAMPLE_INTERVAL_SECONDS),
+        "total_points": len(datetimes),
+        "first_measure": datetimes[0].isoformat(timespec="seconds"),
+        "last_measure": latest_dt.isoformat(timespec="seconds"),
+        "incident_count": len(incidents),
+        "missed_windows": missed_windows,
+        "total_dropout_seconds": int(total_dropout_seconds),
+        "total_dropout_duration": format_duration(total_dropout_seconds),
+        "longest_gap_seconds": int(longest_gap_seconds),
+        "longest_gap_duration": format_duration(longest_gap_seconds),
+        "average_interval_duration": format_duration(average_interval) if average_interval else None,
+        "current_dropout": current_dropout,
+        "current_dropout_duration": format_duration(current_dropout_seconds) if current_dropout else None,
+        "incidents": incidents[-10:][::-1],
+    }
+
 
 def read_rows(start, end):
     paths = csv_paths_between(start, end)
@@ -475,6 +687,7 @@ def index():
 
     chart_points = chart_points_from_rows(rows, metric, limit)
     table_rows = rows[-30:][::-1]
+    diagnostics = compute_diagnostics(rows)
 
     return render_template_string(
         HTML,
@@ -493,6 +706,7 @@ def index():
         chart_points_json=json.dumps(chart_points),
         status=status,
         status_class=status_class,
+        diagnostics=diagnostics,
         server_time=datetime.now().isoformat(timespec="seconds"),
     )
 
@@ -533,6 +747,7 @@ def api_data():
         "metric_label": METRICS[metric],
         "csv_count": len(paths),
         "points": chart_points_from_rows(rows, metric, limit),
+        "diagnostics": compute_diagnostics(rows),
     })
 
 
