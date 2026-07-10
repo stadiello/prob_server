@@ -11,11 +11,11 @@ TARGET_NAME = "BBC micro:bit"
 TARGET_ADDRESS = "F8:B4:AB:35:89:E3"
 
 # Nordic UART Service :
-# périphérique/micro:bit -> central/Raspberry Pi : notifications
-UART_TX_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
+# micro:bit -> Raspberry Pi : indications BLE
+UART_TX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
 
-# central/Raspberry Pi -> périphérique/micro:bit : écriture
-UART_RX_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
+# Raspberry Pi -> micro:bit : écriture de l'ACK
+UART_RX_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
 
 OUTPUT_DIR = Path("/home/pi/microbit_data")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
