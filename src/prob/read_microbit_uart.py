@@ -298,7 +298,18 @@ async def collect_once() -> bool:
                 line_queue.put_nowait(line)
 
     async with BleakClient(device, timeout=30.0) as client:
-        log(f"Connecté : {client.is_connected}")
+    log(f"Connecté : {client.is_connected}")
+
+    for service in client.services:
+        log(f"Service BLE : {service.uuid}")
+
+        for characteristic in service.characteristics:
+            log(
+                f"  Caractéristique : {characteristic.uuid} "
+                f"propriétés={characteristic.properties}"
+            )
+
+    await client.start_notify(UART_TX_UUID, on_data)
 
         await client.start_notify(UART_TX_UUID, on_data)
 
